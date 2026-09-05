@@ -30,7 +30,6 @@ pub async fn render_latex(
     display_mode: bool,
 ) -> Result<String, String> {
     let preamble = state.get_preamble();
-
     latex::compile(&id, &tex, display_mode, &preamble)
 }
 

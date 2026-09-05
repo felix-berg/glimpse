@@ -1,7 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
-import "katex/dist/katex.min.css";
 import MarkdownIt from "markdown-it";
 import mdLineNumbers from "markdown-it-inject-linenumbers";
 import { renderLatex, resetLatexQueue, whenLatexQueueEmpty } from "./latex/render";

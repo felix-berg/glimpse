@@ -1,4 +1,4 @@
-use std::fs;
+use std::{fs, result};
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};  
@@ -58,9 +58,8 @@ pub fn compile(
 ) -> Result<String, String> {
     let tex_content = generate_latex_content(tex, display_mode, preamble_content);
 
-    // Create temp dir
-    let temp_dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let tex_path = temp_dir.path().join(format!("{}.tex", id));
+    let output_dir = "/Users/felix/dev/github/glimpse/test/latexoutput";
+    let tex_path = format!("/Users/felix/dev/github/glimpse/test/latexinput/{}.tex", id);
     std::fs::write(&tex_path, tex_content).map_err(|e| e.to_string())?;
 
     // Run latex
@@ -68,28 +67,28 @@ pub fn compile(
         .args([
             "-interaction=nonstopmode",
             "-output-directory",
-            temp_dir.path().to_str().unwrap(),
-            tex_path.to_str().unwrap(),
+            output_dir,
+            tex_path.as_str(),
         ])
         .output()
         .map_err(|e| format!("`latex` command failed: {}", e))?;
 
     if !latex_output.status.success() {
-        let log = fs::read_to_string(temp_dir.path().join("input.log"))
+        let log = fs::read_to_string(format!("{}/{}.log", output_dir, id))
             .unwrap_or_else(|_| "Could not read LaTeX log.".to_string());
 
         return Err(format!("LaTeX compilation failed. See log:\n\n{}", log));
     }
 
     // Run dvisvgm
-    let dvi_path = temp_dir.path().join(format!("{}.dvi", id));
+    let dvi_path = format!("{}/{}.dvi", output_dir, id);
     let dvisvgm_output = Command::new("dvisvgm")
         .args([
             "--zoom=1.1", // Seems to fix scaling issues
             "--exact-bbox",
             "--no-fonts",
             "--stdout",
-            dvi_path.to_str().unwrap(),
+            dvi_path.as_str(),
         ])
         .output()
         .map_err(|e| format!("`dvisvgm` command failed: {}", e))?;
@@ -101,8 +100,13 @@ pub fn compile(
         ));
     }
 
-    // Return SVG
-    String::from_utf8(dvisvgm_output.stdout).map_err(|e| e.to_string())
+    let svg_path = format!("{}/{}.svg", output_dir, id);
+
+    let result = String::from_utf8(dvisvgm_output.stdout).map_err(|e| e.to_string());
+    if let Ok(str) = &result {
+        std::fs::write(&svg_path, str);
+    }
+    result
 }
 
 fn generate_latex_content(tex: &str, display_mode: bool, preamble_content: &str) -> String {
