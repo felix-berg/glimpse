@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager};  
 
 const DEFAULT_PREAMBLE: &str = r#"
     \usepackage{amsmath}
@@ -110,6 +110,7 @@ fn generate_latex_content(tex: &str, display_mode: bool, preamble_content: &str)
         r#"
             \documentclass[dvisvgm, preview, 12pt]{{standalone}}
             \usepackage[utf8]{{inputenc}}
+            \usepackage{{xcolor}}
             % --- Preamble below ---
             {}
             % --- Input below ---
@@ -118,40 +119,7 @@ fn generate_latex_content(tex: &str, display_mode: bool, preamble_content: &str)
             \end{{document}}
         "#,
         preamble_content,
-        // If not display mode, wrap in $...$ for inline math
-        if display_mode {
-            if tex.trim_start().starts_with(r"\begin") {
-                tex.to_string()
-            } else {
-                format!(r"\[{}\]", tex)
-            }
-        } else {
-            format!("${}$", tex)
-        }
+        // TODO: make it do text-size when not in display mode
+        format!("\\begin{{equation*}}\\textcolor[RGB]{{244, 244, 244}}{{\\rule[0pt]{{1pt}}{{1pt}}}}\n{}\n\\end{{equation*}}", tex)
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_generate_latex_content_display_mode_no_env() {
-        let content = generate_latex_content("x^2", true, "");
-        assert!(content.contains(r"\[x^2\]"));
-    }
-
-    #[test]
-    fn test_generate_latex_content_display_mode_with_env() {
-        let tex = r"\begin{align*} x^2 \end{align*}";
-        let content = generate_latex_content(tex, true, "");
-        assert!(content.contains(tex));
-        assert!(!content.contains(r"\[\begin{align*}"));
-    }
-
-    #[test]
-    fn test_generate_latex_content_inline_mode() {
-        let content = generate_latex_content("x^2", false, "");
-        assert!(content.contains("$x^2$"));
-    }
 }

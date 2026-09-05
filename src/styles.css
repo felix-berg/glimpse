@@ -165,14 +165,21 @@ body {
 }
 
 .latex-rendered-block svg {
-  vertical-align: middle;
-  max-width: 100%;
   height: auto;
   padding: 1em;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   fill: currentColor;
   background-color: #161b22;
+}
+
+.latex-rendered-inline,
+#content svg:not(.latex-rendered-block svg) {
+  display: inline-block;
+  fill: currentColor;
+  width: auto;
+  height: auto;
+  overflow: visible; /* PREVENTS CLIPPING of exponents, descenders & roots */
 }
 
 .latex-placeholder {
@@ -392,4 +399,8 @@ dialog[open] {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }
+}
+
+rect[fill="#f4f4f4"] {
+  opacity: 0%;
 }

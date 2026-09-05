@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import "katex/dist/katex.min.css";
 import MarkdownIt from "markdown-it";
 import mdLineNumbers from "markdown-it-inject-linenumbers";
-import { renderLatex, renderInlineKatex, resetLatexQueue, whenLatexQueueEmpty } from "./latex/render";
+import { renderLatex, resetLatexQueue, whenLatexQueueEmpty } from "./latex/render";
 
 import { setupMenu } from "./menu/menu";
 import { SettingsManager } from './settings/settings';
@@ -13,18 +13,27 @@ import texmath from "markdown-it-texmath";
 
 import { MarkdownUpdateEvent } from "./types/types";
 
+const BASE_PATH = "/Users/felix/Datalogi AU/noter/"
+
 // Initialize MarkdownIt with plugins
 const md = new MarkdownIt().use(mdLineNumbers).use(texmath, {
   delimiters: "dollars",
 });
 
 md.renderer.rules.math_inline = (tokens, idx): string => {
-  return renderInlineKatex(tokens, idx, false);
+  return renderLatex(tokens, idx, false);
 };
 
 md.renderer.rules.math_block = (tokens, idx): string => {
   return renderLatex(tokens, idx, true);
 };
+
+md.renderer.rules.image = (tokens, idx): string => {
+  const token = tokens[idx]
+  const src = token.attrGet('src');
+  
+  return `<img src="${BASE_PATH}/${src}" alt="${token.attrGet('alt') || ''}">`;
+}
 
 md.renderer.rules.math_inline_double = md.renderer.rules.math_block;
 md.renderer.rules.math_block_eqno = md.renderer.rules.math_block;

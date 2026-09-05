@@ -83,7 +83,7 @@ export class SettingsManager {
     try {
       const selectedPath = await open({
         multiple: false,
-        filters: [{ name: "LaTeX", extensions: ["tex"] }],
+        filters: [{ name: "LaTeX", extensions: ["tex", "sty"] }],
       });
 
       if (!selectedPath || typeof selectedPath !== "string") return;
