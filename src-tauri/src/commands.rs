@@ -1,7 +1,6 @@
 use crate::constants;
 use crate::latex;
 use crate::latex::LatexMathCompiler;
-use tauri::Manager;
 use tauri::{command, AppHandle, State};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -31,8 +30,9 @@ pub async fn render_latex(
     tex: String,
     display_mode: bool,
 ) -> Result<String, String> {
-    println!("{},{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros(), tex);
-    state.math_to_svg(&tex).await
+    // println!("{},{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros(), tex.replace("\n", "\\n"));
+    let res = state.math_to_svg(&tex).await;
+    res
 }
 
 #[command]

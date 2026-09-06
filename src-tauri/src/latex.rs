@@ -1,21 +1,65 @@
-use std::fs;
+use std::sync::atomic::AtomicBool;
+use std::{fs, thread};
 use std::hash::{Hash, DefaultHasher, Hasher};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc, MutexGuard};
+use cocoa::appkit::NSOpenGLPixelFormatAttribute::NSOpenGLPFAAllRenderers;
+use futures::TryFutureExt;
+use futures::channel::oneshot;
 use tauri::{AppHandle, Manager};  
 use std::collections::{HashMap};
 use std::future::{Future};
 use futures::future::{Shared, BoxFuture, FutureExt};
+use std::time::{Duration};
 
 pub trait LatexMathCompiler {
     fn set_preamble(&self, content: String) -> Result<(), String>;
     fn math_to_svg(&self, math: &String) -> impl Future<Output = Result<String, String>>;
 }
 
+type SharedFuture<T> = Shared<oneshot::Receiver<T>>;
+
+struct RenderJob {
+    pub future: Shared<oneshot::Receiver<Result<(), String>>>,
+    pub math_blocks: Arc<Mutex<Vec<String>>>,
+    finished: Arc<AtomicBool>
+}
+
+impl RenderJob {
+    pub fn new(initial_vec: Vec<String>, preamble: String, base_path: std::path::PathBuf) -> Self {
+        let (tx, rx) = oneshot::channel::<Result<(), String>>();
+
+        let shared_rx = rx.shared();
+
+        let math_blocks = Arc::new(Mutex::new(initial_vec));
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let math_blocks2 = math_blocks.clone();
+        let finished2 = finished.clone();
+
+        tokio::spawn(async move {
+            thread::sleep(Duration::from_millis(100));
+
+            let math_blocks = math_blocks2.lock().unwrap();
+            finished2.store(true, std::sync::atomic::Ordering::Relaxed);
+
+            println!("Rendering {} math blocks", math_blocks.len());
+            tx.send(compile(&math_blocks, false, &preamble, &base_path))
+        });
+
+        return RenderJob {
+            future: shared_rx,
+            math_blocks: math_blocks,
+            finished: finished
+        }
+    }
+}
+
 pub struct LatexMathCompilerImpl {
     preamble: Mutex<String>,
-    current_renders: Mutex<HashMap<String, Shared<BoxFuture<'static, Result<(), String>>>>>,
+    current_renders: Arc<Mutex<HashMap<String, SharedFuture<Result<(), String>>>>>,
     base_path: std::path::PathBuf,
+    jobs: Mutex<Vec<RenderJob>>,
 }
 
 const DEFAULT_PREAMBLE: &str = r#"
@@ -105,17 +149,21 @@ fn run_dvisvgm(
     basename: &String,
 ) -> Result<(), String> {
     let dvi_path = tex_dir.join(format!("{}.dvi", basename));
-    let output_pattern = svg_dir.join(format!("{}-%p.svg", basename));
+    let output_pattern = svg_dir.join(format!("{}-%3p.svg", basename));
     let dvisvgm_output = Command::new("dvisvgm")
         .args([
             "--zoom=1.1", // Seems to fix scaling issues
             "--exact-bbox",
             "--no-fonts",
+            "--page=-",
             format!("--output={}", output_pattern.to_str().unwrap()).as_str(),
             dvi_path.to_str().unwrap(),
         ])
         .output()
         .map_err(|e| format!("`dvisvgm` command failed: {}", e))?;
+
+    println!("{}", String::from_utf8_lossy(&dvisvgm_output.stdout));
+    println!("{}", String::from_utf8_lossy(&dvisvgm_output.stderr));
 
     if !dvisvgm_output.status.success() {
         return Err(format!(
@@ -135,7 +183,7 @@ fn rename_svgs(
 ) -> Result<(), String> {
     // rename output svgs to be hash of input
     for i in 0..math_blocks.len() {
-        let old_name = format!("{}-{}.svg", basename, i + 1);
+        let old_name = format!("{}-{:0>3}.svg", basename, (i + 1));
         let new_name = format!("{}.svg", hash_math(math_blocks.get(i).unwrap(), preamble_hash));
 
         let [old_path, new_path] = [&old_name, &new_name].map(|n| svg_dir.join(n));
@@ -239,33 +287,46 @@ impl LatexMathCompilerImpl {
     pub fn new(base_path: std::path::PathBuf, initial_preamble: String) -> Self {
         return Self {
             preamble: Mutex::new(initial_preamble),
-            current_renders: Mutex::new(HashMap::new()),
-            base_path: base_path
+            current_renders: Arc::new(Mutex::new(HashMap::new())),
+            base_path: base_path,
+            jobs: Mutex::new(Vec::new())
         }
     }
 
-    // depending on the state of things, either 
-    // a. start a new render
-    // b. wait for the current render of `math` to finish
-    fn render_or_wait(&self, math: &String, preamble: String) -> Shared<BoxFuture<'static, Result<(), String>>> {
+    fn render_at_some_point(&self, math: &String) -> SharedFuture<Result<(), String>> {
+        let mut jobs = self.jobs.lock().unwrap();
+        for i in 0 .. jobs.len() {
+            let job = jobs.get(i).unwrap();
+
+            // aquire lock eagerly
+            let mut math_blocks = job.math_blocks.lock().unwrap();
+
+            if math_blocks.len() < 10 && !job.finished.load(std::sync::atomic::Ordering::Relaxed) {
+                math_blocks.push(math.clone());
+                return job.future.clone();
+            }
+        };
+
+        jobs.retain(|job| !job.finished.load(std::sync::atomic::Ordering::Relaxed));
+
+        jobs.push(RenderJob::new(vec![math.clone()], self.preamble.lock().unwrap().clone(), self.base_path.clone()));
+
+        jobs.last().unwrap().future.clone()
+    }
+
+    fn obtain_render_future(&self, math: &String) -> SharedFuture<Result<(), String>> {
         let mut future_map = self.current_renders.lock().unwrap();
         if let Some(shared_future) = future_map.get(math) {
+            // this exact math is currently being rendered
             shared_future.clone()
         } else {
-            let math_clone = math.clone();
-            let base_path_clone = self.base_path.clone();
-
-            let future = async move {
-                compile(&vec![math_clone], false, preamble.as_str(), &base_path_clone) // TODO: Display mode
-            }.boxed().shared();
-
+            let future = self.render_at_some_point(math);
             future_map.insert(math.clone(), future.clone());
             future
         }
     }
 }
 
-// TODO: garbage collection of svg/ directory
 impl LatexMathCompiler for LatexMathCompilerImpl {
     fn set_preamble(&self, content: String) -> Result<(), String> {
         { // set preamble
@@ -277,20 +338,21 @@ impl LatexMathCompiler for LatexMathCompilerImpl {
 
     async fn math_to_svg(&self, math: &String) -> Result<String, String> {
         let svg_dir = &self.base_path.join("svg");
-        let preamble: String = { 
-            let lock = self.preamble.lock().unwrap();
-            lock.clone()
-        };
-        let preamble_hash = hash(&preamble);
 
-        if let Some(svg) = svg_lookup(&svg_dir, &math, &preamble_hash) {
-            return Ok(svg)
+        {
+            let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
+            if let Some(svg) = svg_lookup(&svg_dir, &math, &preamble_hash) {
+                return Ok(svg)
+            }
         }
 
-        self.render_or_wait(math, preamble).await
-            .and_then(|()| 
+        let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
+        match self.obtain_render_future(math).await {
+            Ok(Ok(())) => 
                 svg_lookup(&svg_dir, &math, &preamble_hash)
-                    .ok_or_else(|| todo!("fix this bug: no svg after compilation with no errors"))
-            )
+                    .ok_or_else(|| todo!("fix this bug: no svg after compilation with no errors")),
+            Ok(Err(e)) => Err(e),
+            Err(_) => todo!()
+        }
     }
 }
