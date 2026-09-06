@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import MarkdownIt from "markdown-it";
 import mdLineNumbers from "markdown-it-inject-linenumbers";
-import { renderLatex, resetLatexQueue, whenLatexQueueEmpty } from "./latex/render";
+import { renderLatex } from "./latex/render";
 
 import { setupMenu } from "./menu/menu";
 import { SettingsManager } from './settings/settings';
@@ -50,27 +50,15 @@ listen<MarkdownUpdateEvent>("markdown-update", (event) => {
   lastContent = content;
   lastCursorLine = cursorLine;
 
-  resetLatexQueue();
-
   updateFileName(fileName);
   renderMarkdown(content);
   scrollIntoView(cursorLine);
-
-  whenLatexQueueEmpty(() => {
-    requestAnimationFrame(() => {
-      scrollIntoView(cursorLine);
-    });
-  });
 });
 
 window.addEventListener("settings-changed", () => {
-  resetLatexQueue();
   renderMarkdown(lastContent);
-
-  whenLatexQueueEmpty(() => {
-    requestAnimationFrame(() => {
-      scrollIntoView(lastCursorLine);
-    });
+  requestAnimationFrame(() => {
+    scrollIntoView(lastCursorLine);
   });
 });
 

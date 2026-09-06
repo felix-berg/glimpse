@@ -24,28 +24,6 @@ const DEFAULT_PREAMBLE: &str = r#"
     \usepackage{amsfonts}
 "#;
 
-pub struct LatexSettings {
-    preamble: Mutex<String>,
-}
-
-impl LatexSettings {
-    pub fn new(initial_content: String) -> Self {
-        Self {
-            preamble: Mutex::new(initial_content),
-        }
-    }
-
-    pub fn get_preamble(&self) -> String {
-        let guard = self.preamble.lock().unwrap();
-        guard.clone()
-    }
-
-    pub fn set_preamble(&self, new_content: String) {
-        let mut guard = self.preamble.lock().unwrap();
-        *guard = new_content;
-    }
-}
-
 pub fn read_preamble(app: &AppHandle) -> String {
     match app.path().app_config_dir() {
         Ok(config_dir) => {
@@ -81,10 +59,10 @@ fn hash<T: Hash>(t: &T) -> String {
     i.to_string()
 }
 
-// pub fn get_math_hash(math: &String, display_mode: bool) -> String {
-//     let str = format!("{}-{}", display_mode, math);
-//     hash(str)
-// }
+fn hash_math(math: &String, preamble_hash: &String) -> String {
+    let str = format!("{}-{}", math, preamble_hash);
+    hash(&str)
+}
 
 fn create_tex_file(
     tex_dir: &std::path::PathBuf,
@@ -153,11 +131,12 @@ fn rename_svgs(
     math_blocks: &Vec<String>,
     svg_dir: &std::path::PathBuf,
     basename: &String,
+    preamble_hash: &String,
 ) -> Result<(), String> {
     // rename output svgs to be hash of input
     for i in 0..math_blocks.len() {
         let old_name = format!("{}-{}.svg", basename, i + 1);
-        let new_name = format!("{}.svg", hash(math_blocks.get(i).unwrap()));
+        let new_name = format!("{}.svg", hash_math(math_blocks.get(i).unwrap(), preamble_hash));
 
         let [old_path, new_path] = [&old_name, &new_name].map(|n| svg_dir.join(n));
 
@@ -181,7 +160,7 @@ fn remove_scratch_files(
         format!("{}.log", &basename),
     ] {
         if std::fs::remove_file(tex_dir.join(&f)).is_err() {
-            todo!("Handle removing {} failed", f)
+            // TODO: handle this case
         }
     }
 
@@ -198,13 +177,14 @@ fn compile(
     let tex_dir = base_path.join("tex");
     let svg_dir = base_path.join("svg");
     let basename = get_fresh_basename();
+    let preamble_hash = hash(&preamble_content.to_string());
 
     let tex_content = generate_latex_content(&math_blocks, display_mode, preamble_content);
     let svg_result: Result<(), String> = Ok(())
         .and_then(|_| create_tex_file(&tex_dir, &basename, &tex_content))
         .and_then(|_| run_latex_compiler(&tex_dir, &basename))
         .and_then(|_| run_dvisvgm(&tex_dir, &svg_dir, &basename))
-        .and_then(|_| rename_svgs(&math_blocks, &svg_dir, &basename));
+        .and_then(|_| rename_svgs(&math_blocks, &svg_dir, &basename, &preamble_hash));
 
     let clean_result = remove_scratch_files(&tex_dir, &basename);
     if clean_result.is_err() { todo!("handle cleaning failed") }
@@ -239,12 +219,10 @@ fn generate_latex_content(math_blocks: &Vec<String>, display_mode: bool, preambl
     )
 }
 
-fn svg_lookup(svg_dir: &std::path::PathBuf, math: &String) -> Option<String> {
-    let svg_name = hash(math);
+fn svg_lookup(svg_dir: &std::path::PathBuf, math: &String, preamble_hash: &String) -> Option<String> {
+    let svg_name = hash_math(math, preamble_hash);
     let svg_path = svg_dir.join(format!("{}.svg", svg_name));
 
-    println!("looking up {}", svg_path.display());
-    
     match std::fs::exists(&svg_path) {
         Ok(false) => return None,
         Ok(true) => (),
@@ -265,41 +243,54 @@ impl LatexMathCompilerImpl {
             base_path: base_path
         }
     }
+
+    // depending on the state of things, either 
+    // a. start a new render
+    // b. wait for the current render of `math` to finish
+    fn render_or_wait(&self, math: &String, preamble: String) -> Shared<BoxFuture<'static, Result<(), String>>> {
+        let mut future_map = self.current_renders.lock().unwrap();
+        if let Some(shared_future) = future_map.get(math) {
+            shared_future.clone()
+        } else {
+            let math_clone = math.clone();
+            let base_path_clone = self.base_path.clone();
+
+            let future = async move {
+                compile(&vec![math_clone], false, preamble.as_str(), &base_path_clone) // TODO: Display mode
+            }.boxed().shared();
+
+            future_map.insert(math.clone(), future.clone());
+            future
+        }
+    }
 }
 
+// TODO: garbage collection of svg/ directory
 impl LatexMathCompiler for LatexMathCompilerImpl {
     fn set_preamble(&self, content: String) -> Result<(), String> {
-        let mut lock = self.preamble.lock().unwrap();
-        *lock = content;
+        { // set preamble
+            let mut preamble = self.preamble.lock().unwrap();
+            *preamble = content;
+        }
         Ok(())
     }
 
     async fn math_to_svg(&self, math: &String) -> Result<String, String> {
         let svg_dir = &self.base_path.join("svg");
-        if let Some(svg) = svg_lookup(&svg_dir, &math) {
+        let preamble: String = { 
+            let lock = self.preamble.lock().unwrap();
+            lock.clone()
+        };
+        let preamble_hash = hash(&preamble);
+
+        if let Some(svg) = svg_lookup(&svg_dir, &math, &preamble_hash) {
             return Ok(svg)
         }
 
-        let future = {
-            let mut future_map = self.current_renders.lock().unwrap();
-            if let Some(shared_future) = future_map.get(math) {
-                shared_future.clone()
-            } else {
-                let math_clone = math.clone();
-                let base_path_clone = self.base_path.clone();
-                let preamble = self.preamble.lock().unwrap().clone();
-
-                let future = async move {
-                    compile(&vec![math_clone], false, preamble.as_str(), &base_path_clone) // TODO: Display mode
-                }.boxed().shared();
-
-                future_map.insert(math.clone(), future.clone());
-                future
-            }
-        };
-
-        future.await.and_then(|()| 
-            svg_lookup(&svg_dir, &math).ok_or_else(|| todo!("fix this bug: no svg after compilation with no errors"))
-        )
+        self.render_or_wait(math, preamble).await
+            .and_then(|()| 
+                svg_lookup(&svg_dir, &math, &preamble_hash)
+                    .ok_or_else(|| todo!("fix this bug: no svg after compilation with no errors"))
+            )
     }
 }

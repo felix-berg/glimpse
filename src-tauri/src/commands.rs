@@ -5,6 +5,7 @@ use tauri::Manager;
 use tauri::{command, AppHandle, State};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use std::time::{UNIX_EPOCH, SystemTime};
 
 #[command]
 pub async fn line_clicked(_app: AppHandle, line_number: u32) {
@@ -30,6 +31,7 @@ pub async fn render_latex(
     tex: String,
     display_mode: bool,
 ) -> Result<String, String> {
+    println!("{},{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros(), tex);
     state.math_to_svg(&tex).await
 }
 
