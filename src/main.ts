@@ -8,15 +8,17 @@ import { renderLatex, resetLatexQueue, whenLatexQueueEmpty } from "./latex/rende
 import { setupMenu } from "./menu/menu";
 import { SettingsManager } from './settings/settings';
 
-import texmath from "markdown-it-texmath";
+import markdownItMath from "markdown-it-math/no-default-renderer";
 
 import { MarkdownUpdateEvent } from "./types/types";
 
 const BASE_PATH = "/Users/felix/Datalogi AU/noter/"
 
 // Initialize MarkdownIt with plugins
-const md = new MarkdownIt().use(mdLineNumbers).use(texmath, {
-  delimiters: "dollars",
+const md = new MarkdownIt().use(mdLineNumbers).use(markdownItMath, {
+  inlineDelimiters: ["$", ["$`", "`$"]],
+  inlineAllowWhiteSpacePadding: true,
+  blockDelimiters: "$$",
 });
 
 md.renderer.rules.math_inline = (tokens, idx): string => {
@@ -82,7 +84,8 @@ const updateFileName = (fileName: string) => {
 };
 
 const renderMarkdown = (markdown: string) => {
-  const html = md.render(markdown);
+  const markdownReduced = markdown.replace(/([^\n])\n([^\n])/, "$1$2")
+  const html = md.render(markdownReduced);
   if (contentEl) contentEl.innerHTML = html;
 };
 

@@ -1,9 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { v4 as uuidv4 } from 'uuid';
 
-type EventualPath = { enum: 'value', path: string } | { enum: 'promise', promise: Promise<string> }
+class MathRenderer {
+  constructor() {
+    
+  }
+  
+  async render(id: string, math: string, displayMode: boolean): SVGSVGElement {
+    
+  }
+}
 
-const latexCache: Map<string, EventualPath> = new Map();
+type EventualString = { enum: 'value', string: string } | { enum: 'promise', promise: Promise<string> }
+
+const latexCache: Map<string, EventualString> = new Map();
 let activeRenders = 0;
 let latexQueueCallback: (() => void) | null = null;
 
@@ -63,10 +73,10 @@ const callRenderer = async (id: string, tex: string, displayMode: boolean) => {
 
   if (latexCache.has(hash)) {
     console.log('Using cached LaTeX for', id);
-    const eventualPath = latexCache.get(hash)!;
-    const svgString = eventualPath.enum === 'value' ?
-      eventualPath.path :
-      (await eventualPath.promise)
+    const eventualString = latexCache.get(hash)!;
+    const svgString = eventualString.enum === 'value' ?
+      eventualString.string :
+      (await eventualString.promise)
 
     setTimeout(() => {
       replaceWithLatex(id, svgString, displayMode);
@@ -78,12 +88,11 @@ const callRenderer = async (id: string, tex: string, displayMode: boolean) => {
 
   try {
     const svgPromise = invoke<string>('render_latex', { id, tex, displayMode })
-
     latexCache.set(hash, { enum: 'promise', promise: svgPromise })
 
     const svgString = await svgPromise
     replaceWithLatex(id, svgString, displayMode);
-    latexCache.set(hash, { enum: 'value', path: svgString });
+    latexCache.set(hash, { enum: 'value', string: svgString });
   } catch (error) {
     console.error('Error rendering LaTeX:', error);
   } finally {

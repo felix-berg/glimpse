@@ -1,7 +1,8 @@
-use std::{fs, result};
+use std::fs;
 use std::process::Command;
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager};  
+use tauri::path::{BaseDirectory, PathResolver};
+use tauri::{AppHandle, Manager, path};  
 
 const DEFAULT_PREAMBLE: &str = r#"
     \usepackage{amsmath}
@@ -50,16 +51,29 @@ pub fn read_preamble(app: &AppHandle) -> String {
     DEFAULT_PREAMBLE.to_string()
 }
 
+
+static ID_COUNTER: Mutex<i32> = Mutex::new(0);
+
 pub fn compile(
-    id: &str,
-    tex: &str,
+    math_blocks: Vec<String>,
     display_mode: bool,
     preamble_content: &str,
+    base_path: &std::path::PathBuf,
 ) -> Result<String, String> {
-    let tex_content = generate_latex_content(tex, display_mode, preamble_content);
+    let mut idInt = 0;
 
-    let output_dir = "/Users/felix/dev/github/glimpse/test/latexoutput";
-    let tex_path = format!("/Users/felix/dev/github/glimpse/test/latexinput/{}.tex", id);
+    {
+        let mut guard = ID_COUNTER.lock().unwrap();
+        idInt = guard.clone();
+        *guard = idInt + 1;
+    };
+
+    let id = idInt.to_string();
+
+    let tex_content = generate_latex_content(math_blocks, display_mode, preamble_content);
+
+    // Create temp dir
+    let tex_path = base_path.join(format!("{}.tex", id));
     std::fs::write(&tex_path, tex_content).map_err(|e| e.to_string())?;
 
     // Run latex
@@ -67,28 +81,28 @@ pub fn compile(
         .args([
             "-interaction=nonstopmode",
             "-output-directory",
-            output_dir,
-            tex_path.as_str(),
+            base_path.to_str().unwrap(),
+            tex_path.to_str().unwrap(),
         ])
         .output()
         .map_err(|e| format!("`latex` command failed: {}", e))?;
 
     if !latex_output.status.success() {
-        let log = fs::read_to_string(format!("{}/{}.log", output_dir, id))
+        let log = fs::read_to_string(base_path.join(format!("{}.log", id)))
             .unwrap_or_else(|_| "Could not read LaTeX log.".to_string());
 
         return Err(format!("LaTeX compilation failed. See log:\n\n{}", log));
     }
 
     // Run dvisvgm
-    let dvi_path = format!("{}/{}.dvi", output_dir, id);
+    let dvi_path = base_path.join(format!("{}.dvi", id));
     let dvisvgm_output = Command::new("dvisvgm")
         .args([
             "--zoom=1.1", // Seems to fix scaling issues
             "--exact-bbox",
             "--no-fonts",
             "--stdout",
-            dvi_path.as_str(),
+            dvi_path.to_str().unwrap(),
         ])
         .output()
         .map_err(|e| format!("`dvisvgm` command failed: {}", e))?;
@@ -100,19 +114,76 @@ pub fn compile(
         ));
     }
 
-    let svg_path = format!("{}/{}.svg", output_dir, id);
-
-    let result = String::from_utf8(dvisvgm_output.stdout).map_err(|e| e.to_string());
-    if let Ok(str) = &result {
-        std::fs::write(&svg_path, str);
-    }
-    result
+    // Return SVG
+    String::from_utf8(dvisvgm_output.stdout).map_err(|e| e.to_string())
 }
 
-fn generate_latex_content(tex: &str, display_mode: bool, preamble_content: &str) -> String {
+// pub fn compile_multi(
+//     ids: [&str],
+//     tex: [&str],
+//     display_mode: bool,
+//     preamble_content: &str,
+//     base_path: &std::path::PathBuf,
+// ) -> Result<String, String> {
+//     let tex_content = generate_latex_content(tex, display_mode, preamble_content);
+//
+//     // Create temp dir
+//     let tex_path = base_path.join(format!("{}.tex", id));
+//     std::fs::write(&tex_path, tex_content).map_err(|e| e.to_string())?;
+//
+//     // Run latex
+//     let latex_output = Command::new("latex")
+//         .args([
+//             "-interaction=nonstopmode",
+//             "-output-directory",
+//             base_path.to_str().unwrap(),
+//             tex_path.to_str().unwrap(),
+//         ])
+//         .output()
+//         .map_err(|e| format!("`latex` command failed: {}", e))?;
+//
+//     if !latex_output.status.success() {
+//         let log = fs::read_to_string(base_path.join("input.log"))
+//             .unwrap_or_else(|_| "Could not read LaTeX log.".to_string());
+//
+//         return Err(format!("LaTeX compilation failed. See log:\n\n{}", log));
+//     }
+//
+//     // Run dvisvgm
+//     let dvi_path = base_path.join(format!("{}.dvi", id));
+//     let dvisvgm_output = Command::new("dvisvgm")
+//         .args([
+//             "--zoom=1.1", // Seems to fix scaling issues
+//             "--exact-bbox",
+//             "--no-fonts",
+//             "--stdout",
+//             dvi_path.to_str().unwrap(),
+//         ])
+//         .output()
+//         .map_err(|e| format!("`dvisvgm` command failed: {}", e))?;
+//
+//     if !dvisvgm_output.status.success() {
+//         return Err(format!(
+//             "dvisvgm conversion failed: {}",
+//             String::from_utf8_lossy(&dvisvgm_output.stderr)
+//         ));
+//     }
+//
+//     // Return SVG
+//     String::from_utf8(dvisvgm_output.stdout).map_err(|e| e.to_string())
+// }
+//
+fn create_equation_page(math: &str) -> String {
+    return format!("\\begin{{page}}\\begin{{equation*}}\\textcolor[RGB]{{244, 244, 244}}{{\\rule[0pt]{{1pt}}{{1pt}}}}\n{}\n\\end{{equation*}}\n\\end{{page}}", math);
+}
+
+fn generate_latex_content(math_blocks: Vec<String>, display_mode: bool, preamble_content: &str) -> String {
+    let pages: Vec<String> = math_blocks.iter().map(|math| create_equation_page(math.as_str())).collect();
+    let body = pages.join("\n");
+
     format!(
         r#"
-            \documentclass[dvisvgm, preview, 12pt]{{standalone}}
+            \documentclass[dvisvgm, preview, 12pt, multi=page]{{standalone}}
             \usepackage[utf8]{{inputenc}}
             \usepackage{{xcolor}}
             % --- Preamble below ---
@@ -124,6 +195,6 @@ fn generate_latex_content(tex: &str, display_mode: bool, preamble_content: &str)
         "#,
         preamble_content,
         // TODO: make it do text-size when not in display mode
-        format!("\\begin{{equation*}}\\textcolor[RGB]{{244, 244, 244}}{{\\rule[0pt]{{1pt}}{{1pt}}}}\n{}\n\\end{{equation*}}", tex)
+        format!("\\begin{{equation*}}\\textcolor[RGB]{{244, 244, 244}}{{\\rule[0pt]{{1pt}}{{1pt}}}}\n{}\n\\end{{equation*}}", body.as_str())
     )
 }

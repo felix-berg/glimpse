@@ -11,7 +11,6 @@ import {
 import { invalidateLatexCache } from "../latex/render";
 
 const PREAMBLE_FILENAME = "preamble.tex";
-const SETTINGS_FILENAME = "settings.json";
 
 export class SettingsManager {
   private modal: HTMLDialogElement;
