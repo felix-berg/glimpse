@@ -1,20 +1,34 @@
 import { invoke } from "@tauri-apps/api/core";
 import { v4 as uuidv4 } from 'uuid';
 
-class MathRenderer {
-  constructor() {
-    
-  }
-  
-  async render(id: string, math: string, displayMode: boolean): SVGSVGElement {
-    
-  }
-}
-
-type EventualString = { enum: 'value', string: string } | { enum: 'promise', promise: Promise<string> }
+// enum DisplayMode {
+//   INLINE,
+//   BLOCK
+// }
+//
+// type EventualString = 
+//   { enum: 'value', string: string } | 
+//   { enum: 'promise', promise: Promise<string> }
+//
+// class MathRenderer {
+//   mathQueue: string[]
+//
+//   constructor() {
+//     this.cache = new Map()
+//   }
+//   
+//   async renderToSVG(math: string, displayMode: DisplayMode): string {
+//
+//     if (!this.isEnqueueing) {
+//       this.isEnqueueing = true;
+//       setTimeout(())
+//     }
+//   }
+// }
+//
 
 const latexCache: Map<string, EventualString> = new Map();
-let activeRenders = 0;
+window.activeRenders = 0;
 let latexQueueCallback: (() => void) | null = null;
 
 export const invalidateLatexCache = () => {
@@ -23,12 +37,12 @@ export const invalidateLatexCache = () => {
 };
 
 export const resetLatexQueue = () => {
-  activeRenders = 0;
+  window.activeRenders = 0;
   latexQueueCallback = null;
 };
 
 export const whenLatexQueueEmpty = (callback: () => void) => {
-  if (activeRenders === 0) {
+  if (window.activeRenders === 0) {
     callback();
   } else {
     latexQueueCallback = callback;
@@ -36,8 +50,8 @@ export const whenLatexQueueEmpty = (callback: () => void) => {
 };
 
 const onRenderComplete = () => {
-  activeRenders--;
-  if (activeRenders === 0 && latexQueueCallback) {
+  window.activeRenders--;
+  if (window.activeRenders === 0 && latexQueueCallback) {
     latexQueueCallback();
   }
 }
@@ -47,7 +61,7 @@ export const renderLatex = (tokens: any[], idx: number, displayMode: boolean): s
   const tex = token.content;
   const id = uuidv4();
 
-  activeRenders++;
+  window.activeRenders++;
 
   console.log('Rendering LaTeX:', { id, tex });
   const escapedTex = tex.replace(/"/g, '&quot;');
@@ -87,7 +101,7 @@ const callRenderer = async (id: string, tex: string, displayMode: boolean) => {
   }
 
   try {
-    const svgPromise = invoke<string>('render_latex', { id, tex, displayMode })
+    const svgPromise = invoke<string>('render_latex', { tex, displayMode })
     latexCache.set(hash, { enum: 'promise', promise: svgPromise })
 
     const svgString = await svgPromise

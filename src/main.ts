@@ -17,8 +17,7 @@ const BASE_PATH = "/Users/felix/Datalogi AU/noter/"
 // Initialize MarkdownIt with plugins
 const md = new MarkdownIt().use(mdLineNumbers).use(markdownItMath, {
   inlineDelimiters: ["$", ["$`", "`$"]],
-  inlineAllowWhiteSpacePadding: true,
-  blockDelimiters: "$$",
+  blockDelimiters: ["$$"],
 });
 
 md.renderer.rules.math_inline = (tokens, idx): string => {
