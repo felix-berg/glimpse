@@ -2,32 +2,53 @@ use std::sync::atomic::AtomicBool;
 use std::{fs, thread};
 use std::hash::{Hash, DefaultHasher, Hasher};
 use std::process::Command;
-use std::sync::{Mutex, Arc, MutexGuard};
-use cocoa::appkit::NSOpenGLPixelFormatAttribute::NSOpenGLPFAAllRenderers;
-use futures::TryFutureExt;
+use std::sync::{Mutex, Arc};
 use futures::channel::oneshot;
 use tauri::{AppHandle, Manager};  
 use std::collections::{HashMap};
 use std::future::{Future};
-use futures::future::{Shared, BoxFuture, FutureExt};
+use futures::future::{Shared, FutureExt};
 use std::time::{Duration};
+
+pub enum SvgResult {
+    Good { svg: String, errors: Vec<String> },
+    Bad { errors: Vec<String> }
+}
 
 pub trait LatexMathCompiler {
     fn set_preamble(&self, content: String) -> Result<(), String>;
-    fn math_to_svg(&self, math: &String) -> impl Future<Output = Result<String, String>>;
+    fn math_to_svg(&self, math: &String) -> impl Future<Output = SvgResult>;
+}
+
+#[derive(Clone)]
+enum LatexError {
+    RenderError { block_idx: usize, line: i32, msg: String },
+    Misc(String)
+}
+
+#[derive(Clone)]
+enum DvisvgmError {
+    Misc(String)
+}
+
+#[derive(Clone)]
+struct RenderResult {
+    math_blocks: Vec<String>, // the blocks that were rendered
+    latex_errors: Vec<LatexError>,
+    dvisvgm_errors: Vec<DvisvgmError>
 }
 
 type SharedFuture<T> = Shared<oneshot::Receiver<T>>;
 
 struct RenderJob {
-    pub future: Shared<oneshot::Receiver<Result<(), String>>>,
+    pub future: Shared<oneshot::Receiver<RenderResult>>,
     pub math_blocks: Arc<Mutex<Vec<String>>>,
     finished: Arc<AtomicBool>
 }
 
 impl RenderJob {
     pub fn new(initial_vec: Vec<String>, preamble: String, base_path: std::path::PathBuf) -> Self {
-        let (tx, rx) = oneshot::channel::<Result<(), String>>();
+        let (tx, rx) = oneshot::channel::<RenderResult>();
 
         let shared_rx = rx.shared();
 
@@ -44,7 +65,7 @@ impl RenderJob {
             finished2.store(true, std::sync::atomic::Ordering::Relaxed);
 
             println!("Rendering {} math blocks", math_blocks.len());
-            tx.send(compile(&math_blocks, false, &preamble, &base_path))
+            tx.send(compile(math_blocks.clone(), false, &preamble, &base_path))
         });
 
         return RenderJob {
@@ -57,7 +78,7 @@ impl RenderJob {
 
 pub struct LatexMathCompilerImpl {
     preamble: Mutex<String>,
-    current_renders: Arc<Mutex<HashMap<String, SharedFuture<Result<(), String>>>>>,
+    current_renders: Arc<Mutex<HashMap<String, SharedFuture<RenderResult>>>>,
     base_path: std::path::PathBuf,
     jobs: Mutex<Vec<RenderJob>>,
 }
@@ -117,11 +138,17 @@ fn create_tex_file(
     std::fs::write(&tex_path, contents).map_err(|e| e.to_string())
 }
 
+fn parse_latex_output(
+    output: String
+) -> Vec<LatexError> {
+    vec![ LatexError::Misc(output) ]
+}
+
 // this runs the `latex` compiler on ${directory}/${basename}.tex with output directory ${directory}
 fn run_latex_compiler(
     tex_dir: &std::path::PathBuf,
     basename: &String,
-) -> Result<(), String> {
+) -> Vec<LatexError> {
     let tex = tex_dir.join(format!("{}.tex", basename));
     let output = Command::new("latex")
         .args([
@@ -131,26 +158,26 @@ fn run_latex_compiler(
             tex.to_str().unwrap(),
         ])
         .output()
-        .map_err(|e| format!("`latex` command failed: {}", e))?;
+        .map_err(|e| format!("`latex` command failed: {}", e));
 
-    if !output.status.success() {
-        let log = fs::read_to_string(tex_dir.join(format!("{}.log", basename)))
-            .unwrap_or_else(|_| "Could not read LaTeX log.".to_string());
-
-        return Err(format!("LaTeX compilation failed. See log:\n\n{}", log));
+    match output {
+        Ok(output) if output.status.success() => 
+            vec![],
+        Ok(output) => 
+            parse_latex_output(String::from_utf8_lossy(&output.stdout).to_string()),
+        Err(error) => 
+            vec![ LatexError::Misc(error.to_string()) ]
     }
-
-    Ok(())
 }
 
 fn run_dvisvgm(
     tex_dir: &std::path::PathBuf,
     svg_dir: &std::path::PathBuf,
     basename: &String,
-) -> Result<(), String> {
+) -> Vec<DvisvgmError> {
     let dvi_path = tex_dir.join(format!("{}.dvi", basename));
     let output_pattern = svg_dir.join(format!("{}-%3p.svg", basename));
-    let dvisvgm_output = Command::new("dvisvgm")
+    let output = Command::new("dvisvgm")
         .args([
             "--zoom=1.1", // Seems to fix scaling issues
             "--exact-bbox",
@@ -160,19 +187,16 @@ fn run_dvisvgm(
             dvi_path.to_str().unwrap(),
         ])
         .output()
-        .map_err(|e| format!("`dvisvgm` command failed: {}", e))?;
+        .map_err(|e| format!("`dvisvgm` command failed: {}", e));
 
-    println!("{}", String::from_utf8_lossy(&dvisvgm_output.stdout));
-    println!("{}", String::from_utf8_lossy(&dvisvgm_output.stderr));
-
-    if !dvisvgm_output.status.success() {
-        return Err(format!(
-            "dvisvgm conversion failed: {}",
-            String::from_utf8_lossy(&dvisvgm_output.stderr)
-        ));
+    match output {
+        Ok(output) if output.status.success() => 
+            vec![], // no errors
+        Ok(output) =>
+            vec![ DvisvgmError::Misc(format!("dvisvgm conversion failed: {}", String::from_utf8_lossy(&output.stderr))) ],
+        Err(err) => 
+            vec![ DvisvgmError::Misc(err) ]
     }
-
-    Ok(())
 }
 
 fn rename_svgs(
@@ -216,11 +240,11 @@ fn remove_scratch_files(
 }
 
 fn compile(
-    math_blocks: &Vec<String>,
+    math_blocks: Vec<String>,
     display_mode: bool,
     preamble_content: &str,
     base_path: &std::path::PathBuf,
-) -> Result<(), String> {
+) -> RenderResult {
 
     let tex_dir = base_path.join("tex");
     let svg_dir = base_path.join("svg");
@@ -228,16 +252,16 @@ fn compile(
     let preamble_hash = hash(&preamble_content.to_string());
 
     let tex_content = generate_latex_content(&math_blocks, display_mode, preamble_content);
-    let svg_result: Result<(), String> = Ok(())
-        .and_then(|_| create_tex_file(&tex_dir, &basename, &tex_content))
-        .and_then(|_| run_latex_compiler(&tex_dir, &basename))
-        .and_then(|_| run_dvisvgm(&tex_dir, &svg_dir, &basename))
-        .and_then(|_| rename_svgs(&math_blocks, &svg_dir, &basename, &preamble_hash));
 
-    let clean_result = remove_scratch_files(&tex_dir, &basename);
-    if clean_result.is_err() { todo!("handle cleaning failed") }
+    // todo: errors
+    create_tex_file(&tex_dir, &basename, &tex_content);
+    let latex_errors = run_latex_compiler(&tex_dir, &basename);
+    let dvisvgm_errors = run_dvisvgm(&tex_dir, &svg_dir, &basename);
+    rename_svgs(&math_blocks, &svg_dir, &basename, &preamble_hash);
 
-    svg_result
+    if remove_scratch_files(&tex_dir, &basename).is_err() { todo!("handle cleaning failed") }
+
+    RenderResult { math_blocks, latex_errors, dvisvgm_errors }
 }
 
 fn create_equation_page(math: &str) -> String {
@@ -293,7 +317,7 @@ impl LatexMathCompilerImpl {
         }
     }
 
-    fn render_at_some_point(&self, math: &String) -> SharedFuture<Result<(), String>> {
+    fn render_at_some_point(&self, math: &String) -> SharedFuture<RenderResult> {
         let mut jobs = self.jobs.lock().unwrap();
         for i in 0 .. jobs.len() {
             let job = jobs.get(i).unwrap();
@@ -314,7 +338,7 @@ impl LatexMathCompilerImpl {
         jobs.last().unwrap().future.clone()
     }
 
-    fn obtain_render_future(&self, math: &String) -> SharedFuture<Result<(), String>> {
+    fn obtain_render_future(&self, math: &String) -> SharedFuture<RenderResult> {
         let mut future_map = self.current_renders.lock().unwrap();
         if let Some(shared_future) = future_map.get(math) {
             // this exact math is currently being rendered
@@ -327,6 +351,24 @@ impl LatexMathCompilerImpl {
     }
 }
 
+fn filter_errors(result: RenderResult, math: &String) -> Vec<String> {
+    if let Some(idx) = result.math_blocks.iter().position(|m| m == math) {
+        let mut errors = result.dvisvgm_errors.iter().map(|e| match e {
+            DvisvgmError::Misc(str) => str.clone(),
+        }).collect::<Vec<String>>();
+        let mut errors2 = result.latex_errors.iter().flat_map(|e| match e {
+            LatexError::RenderError { block_idx, line, msg } if *block_idx == idx =>
+                Some(format!("{}: {}", line, msg)),
+            LatexError::RenderError { block_idx: _, line: _, msg: _ } => None,
+            LatexError::Misc(str) => Some(str.clone()),
+        }).collect::<Vec<String>>();
+        errors.append(&mut errors2);
+        errors
+    } else {
+        todo!()
+    }
+}
+
 impl LatexMathCompiler for LatexMathCompilerImpl {
     fn set_preamble(&self, content: String) -> Result<(), String> {
         { // set preamble
@@ -336,22 +378,25 @@ impl LatexMathCompiler for LatexMathCompilerImpl {
         Ok(())
     }
 
-    async fn math_to_svg(&self, math: &String) -> Result<String, String> {
+    async fn math_to_svg(&self, math: &String) -> SvgResult {
         let svg_dir = &self.base_path.join("svg");
 
         {
             let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
             if let Some(svg) = svg_lookup(&svg_dir, &math, &preamble_hash) {
-                return Ok(svg)
+                return SvgResult::Good { svg, errors: vec![] }
             }
         }
 
         let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
         match self.obtain_render_future(math).await {
-            Ok(Ok(())) => 
-                svg_lookup(&svg_dir, &math, &preamble_hash)
-                    .ok_or_else(|| todo!("fix this bug: no svg after compilation with no errors")),
-            Ok(Err(e)) => Err(e),
+            Ok(result) => {
+                let errors = filter_errors(result, &math);
+                match svg_lookup(&svg_dir, &math, &preamble_hash) {
+                    Some(svg) => SvgResult::Good { svg, errors },
+                    None => SvgResult::Bad { errors }
+                }
+            },
             Err(_) => todo!()
         }
     }

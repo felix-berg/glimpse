@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { v4 as uuidv4 } from 'uuid';
 
+type SvgResult = 
+  | { enum: "good", svg: string, errors: string[] }
+  | { enum: "bad", errors: string[] }
+
 export const renderLatex = (tokens: any[], idx: number, displayMode: boolean): string => {
   const token = tokens[idx];
   const tex = token.content;
@@ -25,8 +29,13 @@ const blockPlaceholderStyle = (id: string) => `<div class="latex-placeholder" id
 
 const callRenderer = async (id: string, tex: string, displayMode: boolean) => {
   try {
-    const svgString = await invoke<string>('render_latex', { tex, displayMode })
-    replaceWithLatex(id, svgString, displayMode);
+    const result = await invoke<SvgResult>('render_latex', { tex, displayMode })
+    if (result.enum === "good") {
+      replaceWithLatex(id, result.svg, displayMode);
+      if (result.errors.length > 0) console.log(result.errors.join("\n"))
+    } else {
+      console.log(result.errors)
+    }
   } catch (error) {
     console.error('Error rendering LaTeX:', error);
   } finally {
