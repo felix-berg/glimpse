@@ -33,15 +33,20 @@ export class SettingsManager {
     open_settings_btn?.addEventListener("click", () => this.modal.showModal());
     close_settings_btn?.addEventListener("click", () => this.modal.close());
 
+
     // Preamble
     const import_preamble_btn = document.getElementById("import-preamble-btn");
     const reset_preamble_btn = document.getElementById("reset-preamble-btn");
+    const set_asset_folder_btn = document.getElementById("set-asset-folder-btn");
 
     reset_preamble_btn?.addEventListener("click", () =>
       this.handlePreambleReset()
     );
     import_preamble_btn?.addEventListener("click", () =>
       this.handlePreambleImport()
+    );
+    set_asset_folder_btn?.addEventListener("click", () => 
+      this.handleSetAssetFolder()
     );
 
     // Open event
@@ -127,6 +132,16 @@ export class SettingsManager {
     }
   }
 
+  private async handleSetAssetFolder() {
+      const selectedPath = await open({
+        multiple: false,
+        directory: true,
+        recursive: true, // allow subdirectories to be accessed
+      });
+
+    alert(selectedPath)
+  }
+
   private handleClickOutside = (event: MouseEvent) => {
     if (event.target === this.modal) {
       this.modal.close();
@@ -144,7 +159,6 @@ export class SettingsManager {
     if (!statusEl) return;
 
     console.log("Refreshing preamble status...");
-
 
     const existsPreamble = await exists(PREAMBLE_FILENAME, {
       baseDir: BaseDirectory.AppConfig,

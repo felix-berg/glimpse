@@ -3,6 +3,7 @@ use crate::latex;
 use crate::latex::LatexMathCompiler;
 use crate::latex::SvgResult;
 use tauri::{command, AppHandle, State};
+use tauri_plugin_shell::ShellExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use serde::Serialize;
@@ -54,11 +55,13 @@ impl Serialize for SvgResult {
 
 #[command]
 pub async fn render_latex(
+    app_handle: AppHandle,
     state: State<'_, latex::LatexMathCompilerImpl>,
     tex: String,
     display_mode: bool,
 ) -> Result<SvgResult, ()> {
-   Ok(state.math_to_svg(&tex.to_string(), display_mode).await.into())
+    app_handle.shell();
+    Ok(state.math_to_svg(&tex.to_string(), display_mode).await.into())
 }
 
 #[command]

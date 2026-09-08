@@ -34,6 +34,7 @@ md.renderer.rules.image = (tokens, idx): string => {
   if (!src) return `<div>NOT FOUND</div>`
 
   const newSrc = convertFileSrc(`${BASE_PATH}${src}`)
+  console.log(src, newSrc)
   
   return `<img src="${newSrc}" alt="${token.attrGet('alt') || ''}">`;
 }

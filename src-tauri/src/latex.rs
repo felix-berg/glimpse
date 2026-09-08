@@ -1,7 +1,6 @@
 use std::sync::atomic::AtomicBool;
 use std::{fs, thread};
 use std::hash::{Hash, DefaultHasher, Hasher};
-use std::process::Command;
 use std::sync::{Mutex, Arc};
 use futures::channel::oneshot;
 use regex::Regex;
@@ -10,6 +9,38 @@ use std::collections::{HashMap};
 use std::future::{Future};
 use futures::future::{Shared, FutureExt};
 use std::time::{Duration};
+
+pub struct CommandResult {
+    status: bool,
+    stdout: String,
+    stderr: String
+}
+
+pub trait CommandRunner {
+    fn run_latex(tex_file: &str, output_dir: &str) -> CommandResult;
+    fn run_dvisvgm(dvi_file: &str, output_pattern: &str) -> CommandResult;
+}
+
+pub struct CommandRunnerImpl {}
+
+impl CommandRunner for CommandRunnerImpl {
+    fn run_latex(tex_file: &str, output_dir: &str) -> CommandResult {
+        let output = std::process::Command::new("latex")
+            .args([
+                "-interaction=nonstopmode",
+                "-output-directory",
+                tex_dir.to_str().unwrap(),
+                tex.to_str().unwrap(),
+            ])
+            .output()
+            .map_err(|e| format!("`latex` command failed: {}", e));
+        todo!()
+    }
+
+    fn run_dvisvgm(dvi_file: &str, output_pattern: &str) -> CommandResult {
+        todo!()
+    }
+}
 
 pub enum SvgResult {
     Perfect { svg: String },
@@ -170,15 +201,7 @@ fn run_latex_compiler(
     ranges: &Vec<(usize, usize)>,
 ) -> Vec<LatexError> {
     let tex = tex_dir.join(format!("{}.tex", basename));
-    let output = Command::new("latex")
-        .args([
-            "-interaction=nonstopmode",
-            "-output-directory",
-            tex_dir.to_str().unwrap(),
-            tex.to_str().unwrap(),
-        ])
-        .output()
-        .map_err(|e| format!("`latex` command failed: {}", e));
+
 
     match output {
         Ok(output) if output.status.success() => 

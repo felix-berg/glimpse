@@ -394,6 +394,14 @@ dialog[open] {
   box-shadow: 0 0 5px rgba(76, 155, 160, 0.4);
 }
 
+
+#asset-folder {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 10px;
+}
+
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(5px); }
   to { opacity: 1; transform: translateY(0); }

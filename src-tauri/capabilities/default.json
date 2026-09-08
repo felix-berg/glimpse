@@ -58,6 +58,22 @@
         }
       ]
     },
-    "fs:default"
+    "fs:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "run-latex",
+          "cmd": "latex",
+          "args": true
+        },
+        {
+          "name": "run-dvisvgm",
+          "cmd": "dvisvgm",
+          "args": true
+        }
+      ]
+    },
+    "shell:default"
   ]
 }
