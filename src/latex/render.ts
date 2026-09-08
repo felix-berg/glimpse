@@ -2,7 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { v4 as uuidv4 } from 'uuid';
 
 type SvgResult = 
-  | { enum: "good", svg: string, errors: string[] }
+  | { enum: "perfect", svg: string }
+  | { enum: "alright", svg: string, errors: string[] }
   | { enum: "bad", errors: string[] }
 
 export const renderLatex = (tokens: any[], idx: number, displayMode: boolean): string => {
@@ -30,9 +31,11 @@ const blockPlaceholderStyle = (id: string) => `<div class="latex-placeholder" id
 const callRenderer = async (id: string, tex: string, displayMode: boolean) => {
   try {
     const result = await invoke<SvgResult>('render_latex', { tex, displayMode })
-    if (result.enum === "good") {
-      replaceWithLatex(id, result.svg, displayMode);
-      if (result.errors.length > 0) console.log(result.errors.join("\n"))
+    console.log(result)
+    if (result.enum === "perfect") {
+      replaceWithLatex(id, result.svg, displayMode, []);
+    } else if (result.enum === "alright") {
+      replaceWithLatex(id, result.svg, displayMode, result.errors);
     } else {
       console.log(result.errors)
     }
@@ -91,7 +94,7 @@ function uniqifySvgUses(svg : SVGSVGElement, id: string) {
   }
 }
 
-const replaceWithLatex = (id: string, svgString: string, displayMode: boolean) => {
+const replaceWithLatex = (id: string, svgString: string, displayMode: boolean, errors: string[]) => {
   const placeholder = document.getElementById(id);
   if (placeholder) {
     placeholder.innerHTML = svgString;
@@ -100,6 +103,12 @@ const replaceWithLatex = (id: string, svgString: string, displayMode: boolean) =
     placeholder.classList.remove('latex-placeholder');
     placeholder.classList.add(displayMode ? 'latex-rendered-block' : 'latex-rendered-inline');
     placeholder.style.width = ""
+    if (errors.length > 0) {
+      svg.style.backgroundColor = "red"
+      svg.addEventListener('click', () => {
+        alert(errors.join('\n'))
+      })
+    }
     uniqifySvgUses(svg, id)
   }
 }

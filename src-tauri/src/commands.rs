@@ -26,22 +26,29 @@ pub async fn line_clicked(_app: AppHandle, line_number: u32) {
 }
 
 
-// This is your mirror enum in the other file
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(tag = "enum")]
-pub enum SvgResultMirror {
-    Good { svg: String, errors: Vec<String> },
-    Bad { errors: Vec<String> },
-}
-
-// Implement a simple conversion from the original to the mirror
-impl From<SvgResult> for SvgResultMirror {
-    fn from(res: SvgResult) -> Self {
-        match res {
-            SvgResult::Good { svg, errors } => Self::Good { svg, errors },
-            SvgResult::Bad { errors } => Self::Bad { errors },
+impl Serialize for SvgResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Define the mirror enum locally inside the function
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase", tag = "enum")]
+        enum Mirror<'a> {
+            Perfect { svg: &'a str },
+            Alright { svg: &'a str, errors: &'a Vec<String> },
+            Bad { errors: &'a Vec<String> },
         }
+
+        // Map the original type to the local mirror type
+        let mirror = match self {
+            SvgResult::Perfect { svg } => Mirror::Perfect { svg },
+            SvgResult::Alright { svg, errors } => Mirror::Alright { svg, errors },
+            SvgResult::Bad { errors } => Mirror::Bad { errors },
+        };
+
+        // Serialize the mirror instance
+        mirror.serialize(serializer)
     }
 }
 
@@ -50,7 +57,7 @@ pub async fn render_latex(
     state: State<'_, latex::LatexMathCompilerImpl>,
     tex: String,
     display_mode: bool,
-) -> Result<SvgResultMirror, ()> {
+) -> Result<SvgResult, ()> {
    Ok(state.math_to_svg(&tex.to_string()).await.into())
 }
 

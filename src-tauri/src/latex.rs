@@ -4,6 +4,7 @@ use std::hash::{Hash, DefaultHasher, Hasher};
 use std::process::Command;
 use std::sync::{Mutex, Arc};
 use futures::channel::oneshot;
+use regex::Regex;
 use tauri::{AppHandle, Manager};  
 use std::collections::{HashMap};
 use std::future::{Future};
@@ -11,7 +12,8 @@ use futures::future::{Shared, FutureExt};
 use std::time::{Duration};
 
 pub enum SvgResult {
-    Good { svg: String, errors: Vec<String> },
+    Perfect { svg: String },
+    Alright { svg: String, errors: Vec<String> },
     Bad { errors: Vec<String> }
 }
 
@@ -22,7 +24,7 @@ pub trait LatexMathCompiler {
 
 #[derive(Clone)]
 enum LatexError {
-    RenderError { block_idx: usize, line: i32, msg: String },
+    RenderError { block_idx: usize, line: usize, msg: String },
     Misc(String)
 }
 
@@ -139,15 +141,33 @@ fn create_tex_file(
 }
 
 fn parse_latex_output(
-    output: String
+    output: &String,
+    ranges: &Vec<(usize, usize)>
 ) -> Vec<LatexError> {
-    vec![ LatexError::Misc(output) ]
+    // this regex seems to work: ^(?:\Q! LaTeX Error: \E|\!\W)(.*)$(?:.|\n)*?^l\.(\d*)\W
+    let regex = Regex::new(r"(?m)^(?:\!\ LaTeX\ Error:\ |\!\W)(.*)$(?:.|\n)*?^l\.(\d*)\W").unwrap();
+
+    let get_block_idx = |line: usize| ranges.iter().position(|&(f, t)| f <= line && line <= t);
+
+    let mut results = vec![];
+    for (error, [msg, line]) in regex.captures_iter(output.as_str()).map(|c| c.extract()) {
+        let abs_line = line.parse::<usize>().unwrap_or_else(|_| todo!());
+        if let Some(block_idx) = get_block_idx(abs_line) {
+            let from = ranges[block_idx].0;
+            let line = abs_line - from;
+            results.push(LatexError::RenderError { block_idx, line, msg: msg.to_string() });
+        } else {
+            results.push(LatexError::Misc(error.to_string()));
+        }
+    }
+    results
 }
 
-// this runs the `latex` compiler on ${directory}/${basename}.tex with output directory ${directory}
+// this runs the `latex` compiler on ${tex_dir}/${basename}.tex with output directory ${tex_dir}
 fn run_latex_compiler(
     tex_dir: &std::path::PathBuf,
     basename: &String,
+    ranges: &Vec<(usize, usize)>,
 ) -> Vec<LatexError> {
     let tex = tex_dir.join(format!("{}.tex", basename));
     let output = Command::new("latex")
@@ -164,7 +184,7 @@ fn run_latex_compiler(
         Ok(output) if output.status.success() => 
             vec![],
         Ok(output) => 
-            parse_latex_output(String::from_utf8_lossy(&output.stdout).to_string()),
+            parse_latex_output(&String::from_utf8_lossy(&output.stdout).to_string(), ranges),
         Err(error) => 
             vec![ LatexError::Misc(error.to_string()) ]
     }
@@ -199,16 +219,26 @@ fn run_dvisvgm(
     }
 }
 
+fn get_svg_name(math: &String, preamble_hash: &String, has_errors: bool) -> String {
+    if has_errors {
+        format!("{}.svg", hash_math(math, preamble_hash))
+    } else {
+        format!("errored-{}.svg", hash_math(math, preamble_hash))
+    }
+}
+
 fn rename_svgs(
     math_blocks: &Vec<String>,
+    have_errors: &Vec<bool>,
     svg_dir: &std::path::PathBuf,
     basename: &String,
     preamble_hash: &String,
 ) -> Result<(), String> {
+    assert_eq!(math_blocks.len(), have_errors.len());
     // rename output svgs to be hash of input
     for i in 0..math_blocks.len() {
         let old_name = format!("{}-{:0>3}.svg", basename, (i + 1));
-        let new_name = format!("{}.svg", hash_math(math_blocks.get(i).unwrap(), preamble_hash));
+        let new_name = get_svg_name(&math_blocks[i], preamble_hash, have_errors[i]);
 
         let [old_path, new_path] = [&old_name, &new_name].map(|n| svg_dir.join(n));
 
@@ -251,13 +281,26 @@ fn compile(
     let basename = get_fresh_basename();
     let preamble_hash = hash(&preamble_content.to_string());
 
-    let tex_content = generate_latex_content(&math_blocks, display_mode, preamble_content);
+    let LatexContent { content, ranges } = generate_latex_content(&math_blocks, display_mode, preamble_content);
 
     // todo: errors
-    create_tex_file(&tex_dir, &basename, &tex_content);
-    let latex_errors = run_latex_compiler(&tex_dir, &basename);
+    create_tex_file(&tex_dir, &basename, &content);
+    let latex_errors = run_latex_compiler(&tex_dir, &basename, &ranges);
     let dvisvgm_errors = run_dvisvgm(&tex_dir, &svg_dir, &basename);
-    rename_svgs(&math_blocks, &svg_dir, &basename, &preamble_hash);
+
+    let error_pertaining_to = |i: usize| {
+        latex_errors.iter().find(|e| match e {
+            LatexError::RenderError { block_idx, line, msg } => *block_idx == i,
+            LatexError::Misc(_) => true,
+        }).is_some() 
+        ||
+        dvisvgm_errors.iter().find(|e| match e {
+            DvisvgmError::Misc(_) => true,
+        }).is_some()
+    };
+
+    let have_errors = (0..math_blocks.len()).map(|i| error_pertaining_to(i)).collect::<Vec<bool>>();
+    rename_svgs(&math_blocks, &have_errors, &svg_dir, &basename, &preamble_hash);
 
     if remove_scratch_files(&tex_dir, &basename).is_err() { todo!("handle cleaning failed") }
 
@@ -269,11 +312,13 @@ fn create_equation_page(math: &str) -> String {
 }
 
 // TODO: handle display mode
-fn generate_latex_content(math_blocks: &Vec<String>, display_mode: bool, preamble_content: &str) -> String {
-    let pages: Vec<String> = math_blocks.iter().map(|math| create_equation_page(math.as_str())).collect();
-    let body = pages.join("\n");
+struct LatexContent {
+    content: String,
+    ranges: Vec<(usize, usize)>, // list of ranges corresponding to input math blocks
+}
 
-    format!(
+fn generate_latex_content(math_blocks: &Vec<String>, display_mode: bool, preamble_content: &str) -> LatexContent {
+    let content = format!(
         r#"
             \documentclass[dvisvgm, preview, 12pt, multi=page]{{standalone}}
             \usepackage[utf8]{{inputenc}}
@@ -282,18 +327,29 @@ fn generate_latex_content(math_blocks: &Vec<String>, display_mode: bool, preambl
             {}
             % --- Input below ---
             \begin{{document}}
-            {}
-            \end{{document}}
-        "#,
-        preamble_content,
-        // TODO: make it do text-size when not in display mode
-        body.as_str()
-    )
+    "#, preamble_content);
+
+    let mut result = LatexContent {
+        content, ranges: vec![]
+    };
+
+    let str_lines = |s: &String| s.as_bytes().iter().filter(|&c| *c == ('\n' as u8)).count();
+
+    for math in math_blocks.iter() {
+        let from = str_lines(&result.content) + 1;
+        let page = create_equation_page(math);
+        let to = from + str_lines(&page);
+        result.content += &page;
+        result.ranges.push((from, to));
+    }
+
+    result.content += "\n\\end{document}";
+
+    return result
 }
 
-fn svg_lookup(svg_dir: &std::path::PathBuf, math: &String, preamble_hash: &String) -> Option<String> {
-    let svg_name = hash_math(math, preamble_hash);
-    let svg_path = svg_dir.join(format!("{}.svg", svg_name));
+fn svg_lookup(svg_dir: &std::path::PathBuf, math: &String, preamble_hash: &String, has_errors: bool) -> Option<String> {
+    let svg_path = svg_dir.join(get_svg_name(math, preamble_hash, has_errors));
 
     match std::fs::exists(&svg_path) {
         Ok(false) => return None,
@@ -383,18 +439,20 @@ impl LatexMathCompiler for LatexMathCompilerImpl {
 
         {
             let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
-            if let Some(svg) = svg_lookup(&svg_dir, &math, &preamble_hash) {
-                return SvgResult::Good { svg, errors: vec![] }
+            if let Some(svg) = svg_lookup(&svg_dir, &math, &preamble_hash, false) {
+                return SvgResult::Perfect { svg }
             }
         }
 
         let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
         match self.obtain_render_future(math).await {
-            Ok(result) => {
-                let errors = filter_errors(result, &math);
-                match svg_lookup(&svg_dir, &math, &preamble_hash) {
-                    Some(svg) => SvgResult::Good { svg, errors },
-                    None => SvgResult::Bad { errors }
+            Ok(result) => match filter_errors(result, &math) {
+                errors if errors.is_empty() => SvgResult::Perfect { 
+                    svg: svg_lookup(&svg_dir, &math, &preamble_hash, false).unwrap_or_else(|| todo!("no svg after no error render"))
+                },
+                errors => match svg_lookup(&svg_dir, &math, &preamble_hash, true) {
+                    Some(svg) => SvgResult::Alright { svg, errors },
+                    None => SvgResult::Bad { errors },
                 }
             },
             Err(_) => todo!()
