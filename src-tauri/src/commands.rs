@@ -58,7 +58,7 @@ pub async fn render_latex(
     tex: String,
     display_mode: bool,
 ) -> Result<SvgResult, ()> {
-   Ok(state.math_to_svg(&tex.to_string()).await.into())
+   Ok(state.math_to_svg(&tex.to_string(), display_mode).await.into())
 }
 
 #[command]

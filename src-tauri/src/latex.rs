@@ -19,7 +19,7 @@ pub enum SvgResult {
 
 pub trait LatexMathCompiler {
     fn set_preamble(&self, content: String) -> Result<(), String>;
-    fn math_to_svg(&self, math: &String) -> impl Future<Output = SvgResult>;
+    fn math_to_svg(&self, math: &String, display_mode: bool) -> impl Future<Output = SvgResult>;
 }
 
 #[derive(Clone)]
@@ -35,7 +35,7 @@ enum DvisvgmError {
 
 #[derive(Clone)]
 struct RenderResult {
-    math_blocks: Vec<String>, // the blocks that were rendered
+    math_blocks: Vec<MathBlock>, // the blocks that were rendered
     latex_errors: Vec<LatexError>,
     dvisvgm_errors: Vec<DvisvgmError>
 }
@@ -44,12 +44,12 @@ type SharedFuture<T> = Shared<oneshot::Receiver<T>>;
 
 struct RenderJob {
     pub future: Shared<oneshot::Receiver<RenderResult>>,
-    pub math_blocks: Arc<Mutex<Vec<String>>>,
+    pub math_blocks: Arc<Mutex<Vec<MathBlock>>>,
     finished: Arc<AtomicBool>
 }
 
 impl RenderJob {
-    pub fn new(initial_vec: Vec<String>, preamble: String, base_path: std::path::PathBuf) -> Self {
+    pub fn new(initial_vec: Vec<MathBlock>, preamble: String, base_path: std::path::PathBuf) -> Self {
         let (tx, rx) = oneshot::channel::<RenderResult>();
 
         let shared_rx = rx.shared();
@@ -80,7 +80,7 @@ impl RenderJob {
 
 pub struct LatexMathCompilerImpl {
     preamble: Mutex<String>,
-    current_renders: Arc<Mutex<HashMap<String, SharedFuture<RenderResult>>>>,
+    current_renders: Arc<Mutex<HashMap<MathBlock, SharedFuture<RenderResult>>>>,
     base_path: std::path::PathBuf,
     jobs: Mutex<Vec<RenderJob>>,
 }
@@ -126,8 +126,8 @@ fn hash<T: Hash>(t: &T) -> String {
     i.to_string()
 }
 
-fn hash_math(math: &String, preamble_hash: &String) -> String {
-    let str = format!("{}-{}", math, preamble_hash);
+fn hash_math(math: &String, preamble_hash: &String, display_mode: bool) -> String {
+    let str = format!("{}-{}-{}", math, preamble_hash, if display_mode { 1 } else { 0 });
     hash(&str)
 }
 
@@ -219,16 +219,22 @@ fn run_dvisvgm(
     }
 }
 
-fn get_svg_name(math: &String, preamble_hash: &String, has_errors: bool) -> String {
+fn get_svg_name(math: &String, display_mode: bool, preamble_hash: &String, has_errors: bool) -> String {
     if has_errors {
-        format!("{}.svg", hash_math(math, preamble_hash))
+        format!("{}.svg", hash_math(math, preamble_hash, display_mode))
     } else {
-        format!("errored-{}.svg", hash_math(math, preamble_hash))
+        format!("errored-{}.svg", hash_math(math, preamble_hash, display_mode))
     }
 }
 
+#[derive(Clone, Hash, Eq, PartialEq)]
+struct MathBlock {
+    display_mode: bool,
+    math: String,
+}
+
 fn rename_svgs(
-    math_blocks: &Vec<String>,
+    math_blocks: &Vec<MathBlock>,
     have_errors: &Vec<bool>,
     svg_dir: &std::path::PathBuf,
     basename: &String,
@@ -238,7 +244,7 @@ fn rename_svgs(
     // rename output svgs to be hash of input
     for i in 0..math_blocks.len() {
         let old_name = format!("{}-{:0>3}.svg", basename, (i + 1));
-        let new_name = get_svg_name(&math_blocks[i], preamble_hash, have_errors[i]);
+        let new_name = get_svg_name(&math_blocks[i].math, math_blocks[i].display_mode, preamble_hash, have_errors[i]);
 
         let [old_path, new_path] = [&old_name, &new_name].map(|n| svg_dir.join(n));
 
@@ -270,7 +276,7 @@ fn remove_scratch_files(
 }
 
 fn compile(
-    math_blocks: Vec<String>,
+    math_blocks: Vec<MathBlock>,
     display_mode: bool,
     preamble_content: &str,
     base_path: &std::path::PathBuf,
@@ -307,8 +313,12 @@ fn compile(
     RenderResult { math_blocks, latex_errors, dvisvgm_errors }
 }
 
-fn create_equation_page(math: &str) -> String {
-    return format!("\\begin{{page}}\\begin{{equation*}}\\textcolor[RGB]{{244, 244, 244}}{{\\rule[0pt]{{1pt}}{{1pt}}}}\n{}\n\\end{{equation*}}\n\\end{{page}}", math);
+fn create_equation_page(math: &str, display_mode: bool) -> String {
+    if display_mode {
+        format!("\\begin{{page}}\\begin{{equation*}}\\rlap{{\\textcolor[RGB]{{244, 244, 244}}{{\\rule[0pt]{{1pt}}{{1pt}}}}}}\n{}\n\\end{{equation*}}\n\\end{{page}}", math)
+    } else {
+        format!("\\begin{{page}}$\\rlap{{\\textcolor[RGB]{{244, 244, 244}}{{\\rule[0pt]{{1pt}}{{1pt}}}}}}{}$\n\\end{{page}}", math)
+    }
 }
 
 // TODO: handle display mode
@@ -317,7 +327,7 @@ struct LatexContent {
     ranges: Vec<(usize, usize)>, // list of ranges corresponding to input math blocks
 }
 
-fn generate_latex_content(math_blocks: &Vec<String>, display_mode: bool, preamble_content: &str) -> LatexContent {
+fn generate_latex_content(math_blocks: &Vec<MathBlock>, display_mode: bool, preamble_content: &str) -> LatexContent {
     let content = format!(
         r#"
             \documentclass[dvisvgm, preview, 12pt, multi=page]{{standalone}}
@@ -335,9 +345,9 @@ fn generate_latex_content(math_blocks: &Vec<String>, display_mode: bool, preambl
 
     let str_lines = |s: &String| s.as_bytes().iter().filter(|&c| *c == ('\n' as u8)).count();
 
-    for math in math_blocks.iter() {
+    for MathBlock { math, display_mode } in math_blocks.iter() {
         let from = str_lines(&result.content) + 1;
-        let page = create_equation_page(math);
+        let page = create_equation_page(math, *display_mode);
         let to = from + str_lines(&page);
         result.content += &page;
         result.ranges.push((from, to));
@@ -348,8 +358,8 @@ fn generate_latex_content(math_blocks: &Vec<String>, display_mode: bool, preambl
     return result
 }
 
-fn svg_lookup(svg_dir: &std::path::PathBuf, math: &String, preamble_hash: &String, has_errors: bool) -> Option<String> {
-    let svg_path = svg_dir.join(get_svg_name(math, preamble_hash, has_errors));
+fn svg_lookup(svg_dir: &std::path::PathBuf, math: &String, display_mode: bool, preamble_hash: &String, has_errors: bool) -> Option<String> {
+    let svg_path = svg_dir.join(get_svg_name(math, display_mode, preamble_hash, has_errors));
 
     match std::fs::exists(&svg_path) {
         Ok(false) => return None,
@@ -373,7 +383,7 @@ impl LatexMathCompilerImpl {
         }
     }
 
-    fn render_at_some_point(&self, math: &String) -> SharedFuture<RenderResult> {
+    fn render_at_some_point(&self, block: MathBlock) -> SharedFuture<RenderResult> {
         let mut jobs = self.jobs.lock().unwrap();
         for i in 0 .. jobs.len() {
             let job = jobs.get(i).unwrap();
@@ -382,33 +392,41 @@ impl LatexMathCompilerImpl {
             let mut math_blocks = job.math_blocks.lock().unwrap();
 
             if math_blocks.len() < 10 && !job.finished.load(std::sync::atomic::Ordering::Relaxed) {
-                math_blocks.push(math.clone());
+                math_blocks.push(block);
                 return job.future.clone();
             }
         };
 
         jobs.retain(|job| !job.finished.load(std::sync::atomic::Ordering::Relaxed));
 
-        jobs.push(RenderJob::new(vec![math.clone()], self.preamble.lock().unwrap().clone(), self.base_path.clone()));
+        jobs.push(RenderJob::new(vec![ block ], self.preamble.lock().unwrap().clone(), self.base_path.clone()));
 
         jobs.last().unwrap().future.clone()
     }
 
-    fn obtain_render_future(&self, math: &String) -> SharedFuture<RenderResult> {
-        let mut future_map = self.current_renders.lock().unwrap();
-        if let Some(shared_future) = future_map.get(math) {
-            // this exact math is currently being rendered
-            shared_future.clone()
-        } else {
-            let future = self.render_at_some_point(math);
-            future_map.insert(math.clone(), future.clone());
-            future
+    async fn obtain_render_future(&self, block: &MathBlock) -> RenderResult {
+        let (future, owner) = {
+            let mut future_map = self.current_renders.lock().unwrap();
+            if let Some(shared_future) = future_map.get(&block) {
+                // this exact math is currently being rendered
+                (shared_future.clone(), false)
+            } else {
+                let future = self.render_at_some_point(block.clone());
+                future_map.insert(block.clone(), future.clone());
+                (future, true)
+            }
+        };
+        let result = future.await.unwrap_or_else(|_| todo!("Future somehow failed..."));
+        if owner {
+            self.current_renders.lock().unwrap()
+                .remove(block);
         }
+        result
     }
 }
 
-fn filter_errors(result: RenderResult, math: &String) -> Vec<String> {
-    if let Some(idx) = result.math_blocks.iter().position(|m| m == math) {
+fn filter_errors(result: RenderResult, math: &String, display_mode: bool) -> Vec<String> {
+    if let Some(idx) = result.math_blocks.iter().position(|m| m == &MathBlock { math: math.clone(), display_mode }) {
         let mut errors = result.dvisvgm_errors.iter().map(|e| match e {
             DvisvgmError::Misc(str) => str.clone(),
         }).collect::<Vec<String>>();
@@ -434,28 +452,25 @@ impl LatexMathCompiler for LatexMathCompilerImpl {
         Ok(())
     }
 
-    async fn math_to_svg(&self, math: &String) -> SvgResult {
+    async fn math_to_svg(&self, math: &String, display_mode: bool) -> SvgResult {
         let svg_dir = &self.base_path.join("svg");
 
-        {
-            let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
-            if let Some(svg) = svg_lookup(&svg_dir, &math, &preamble_hash, false) {
-                return SvgResult::Perfect { svg }
-            }
+        let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
+        if let Some(svg) = svg_lookup(&svg_dir, &math, display_mode, &preamble_hash, false) {
+            return SvgResult::Perfect { svg }
         }
 
-        let preamble_hash = hash(&self.preamble.lock().unwrap().clone());
-        match self.obtain_render_future(math).await {
-            Ok(result) => match filter_errors(result, &math) {
-                errors if errors.is_empty() => SvgResult::Perfect { 
-                    svg: svg_lookup(&svg_dir, &math, &preamble_hash, false).unwrap_or_else(|| todo!("no svg after no error render"))
-                },
-                errors => match svg_lookup(&svg_dir, &math, &preamble_hash, true) {
-                    Some(svg) => SvgResult::Alright { svg, errors },
-                    None => SvgResult::Bad { errors },
-                }
+        let block = MathBlock { display_mode, math: math.clone() };
+        let result = self.obtain_render_future(&block).await;
+        match filter_errors(result, &math, display_mode) {
+            errors if errors.is_empty() => SvgResult::Perfect { 
+                svg: svg_lookup(&svg_dir, &math, display_mode, &preamble_hash, false)
+                    .unwrap_or_else(|| todo!("BUG: no svg after perfect render"))
             },
-            Err(_) => todo!()
+            errors => match svg_lookup(&svg_dir, &math, display_mode, &preamble_hash, true) {
+                Some(svg) => SvgResult::Alright { svg, errors },
+                None => SvgResult::Bad { errors },
+            }
         }
     }
 }

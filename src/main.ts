@@ -74,8 +74,7 @@ const updateFileName = (fileName: string) => {
 };
 
 const renderMarkdown = (markdown: string) => {
-  const markdownReduced = markdown.replace(/([^\n])\n([^\n])/, "$1$2")
-  const html = md.render(markdownReduced);
+  const html = md.render(markdown);
   if (contentEl) contentEl.innerHTML = html;
 };
 
